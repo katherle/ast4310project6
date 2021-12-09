@@ -16,13 +16,16 @@ from cycler import cycler
 plt.rc('legend', frameon=False)
 plt.rc('figure', figsize=(7, 7 / 1.75)) # Larger figure sizes
 plt.rc('font', size=12)
+#from matplotlib import rcParams
+#rcParams['axes.labelpad'] = 15
 
 from scipy.integrate import cumtrapz   # for tau integration
+from scipy.integrate import trapz   # for intensity integration
 from scipy.ndimage import shift  # for "rotating" 3D cubes
 from scipy.special import wofz   # for Voigt function
 from scipy.interpolate import interp1d # for interpolating tau_500
 
-i_units = "kW m-2 sr-1 nm-1"  # More practical SI units
+i_units = u.Quantity(1, "kW m-2 sr-1 nm-1")  # More practical SI units
 
 def read_table_units(filename):
     """
@@ -116,70 +119,69 @@ p_ratio = falc['p_ratio']
 rho_tot = falc['density']
 
 
+#Plot temperature vs height for FALC and 3D models
 fig, ax = plt.subplots()
 ax.plot(height.to('km'),temp, label='FALC')
 # show column (100, 100):
 ax.plot(atm3d['height'].to('km'), atm3d['temperature'][:, 100, 100], label='3D (100, 100)')
 ax.set_ylim(4000, 10000)
-ax.legend();
+ax.set_title('Comparison of temp vs height for 3D and FALC')
+ax.legend()
+plt.show()
 
+#2D plot of temperature
 fig, ax = plt.subplots()
-ax.imshow(atm3d['temperature'].value[-1])
-#ax.imshow(atm3d['temperature'][-1])
+im = ax.imshow(atm3d['temperature'].value[-1], cmap = 'coolwarm')
+ax.set_title('Temperature at deepest point')
+fig.colorbar(im, ax=ax, shrink=0.8, label=r'Temperature (K)')
+plt.show()
 
+#compute tau500 from the 3D model
 alpha_H_3d = (compute_hminus_cross_section(500*u.nm, atm3d['temperature'], atm3d['electron_density'])[..., 0]*atm3d['hydrogen_density'])
 alpha_T_3d = 6.652e-29*u.m**2 * atm3d['electron_density']
 tau_500_3d = -cumtrapz(alpha_H_3d + alpha_T_3d, atm3d['height'], axis = 0, initial = 0)
 
+#compute tau500 from the FALC model
 n_hI = n_h - n_p
 alpha_H_falc = (compute_hminus_cross_section(500*u.nm, temp, n_e)[..., 0]*n_hI)
 alpha_T_falc = 6.652e-29*u.m**2 * n_e
 tau_500_falc = -cumtrapz(alpha_H_falc + alpha_T_falc, height, initial = 0)
 
-# x and y grids, from 0 to 6 Mm (box size), 256 points
-
+#set up x and y grids, from 0 to 6 Mm (box size), 256 points
 X, Y = np.mgrid[0:6:256j, 0:6:256j]
-fig = plt.figure()
+
+#3D plot of tau500 from the 3D model
+fig = plt.figure(figsize = (10, 6))
 ax = fig.add_subplot(projection='3d')
-# tau1_height must be a 2D array (256, 256) with the
-# heights where tau = 1 in km
-ax.plot_surface(X, Y, tau_500_3d[1], cmap='magma', rcount=100, ccount=100)
+im = ax.plot_surface(X, Y, tau_500_3d[1], cmap='magma', rcount=100, ccount=100)
+#fig.colorbar(im, ax=ax, shrink=0.6, label=r'$\tau_{500}$')
 ax.axis((6.3, -0.3, -0.3, 6.3));
 ax.set_xlabel("y (Mm)")
 ax.set_ylabel("x (Mm)")
-ax.set_zlabel("z (km)")
+ax.set_zlabel(r"$\tau_{500}$ [1]", labelpad = 15)
+ax.set_title(r"$\tau_{500}$ at highest point")
 plt.tight_layout()
 plt.show()
 
+#plot of tau500 vs height for four randomly chosen columns + FALC
 fig, ax = plt.subplots()
 custom_cycler = cycler("color", cm.plasma(np.linspace(0, 0.95, 5)))
 ax.set_prop_cycle(custom_cycler)
-ax.plot(atm3d['height'], tau_500_3d[:, 20, 60])
-ax.plot(atm3d['height'], tau_500_3d[:, 100, 89])
-ax.plot(atm3d['height'], tau_500_3d[:, 19, 43])
-ax.plot(atm3d['height'], tau_500_3d[:, 201, 4])
-ax.plot(height, tau_500_falc, label='FALC')
-#ax.set_xlim(-0.5e6, 0.5e6)
+ax.plot(atm3d['height'].to('Mm'), tau_500_3d[:, 20, 60], label = '3D')
+ax.plot(atm3d['height'].to('Mm'), tau_500_3d[:, 100, 89], label = '3D')
+ax.plot(atm3d['height'].to('Mm'), tau_500_3d[:, 19, 43], label = '3D')
+ax.plot(atm3d['height'].to('Mm'), tau_500_3d[:, 201, 4], label = '3D')
+ax.plot(height.to('Mm'), tau_500_falc, label='FALC')
 ax.set_yscale('log')
+ax.set_xlabel('Height [Mm]')
+ax.set_ylabel(r'$\tau_{500}$')
 plt.grid()
 plt.legend()
 plt.show()
 
-"""
-points = (X, Y, atm3d['height'])
+#print(tau_500_3d.shape)
 
-#print(points)
-#print(interpn(points, tau_500_3d, points))
-
-x = np.linspace(0, 255, 256)
-y = np.linspace(0, 255, 256)
-tau_func = RegularGridInterpolator((np.flip(atm3d['height']), x, y), tau_500_3d)
-tau1_height = tau_func(np.array([0, x, y]))
-
-"""
-
-print(tau_500_3d.shape)
-
+#define function to find the height at which tau=1
 def tau_one(tau, height):
     nx,ny = tau_500_3d.shape[1:]
     tau1_height = np.zeros((nx,ny))
@@ -194,13 +196,15 @@ def tau_one(tau, height):
 
 tau1_height = tau_one(np.moveaxis(tau_500_3d,0,-1), atm3d['height'])*u.m
 
+#plot height where tau=1 (2D)
 fig, ax = plt.subplots()
 im = ax.imshow(tau1_height.value, cmap = 'magma')
-fig.colorbar(im, ax=ax, shrink=0.6, label=r'Height where $\tau = 1$ [m]')
+fig.colorbar(im, ax=ax, shrink=0.8, label=r'Height where $\tau_{500} = 1$ [m]')
 plt.tight_layout()
 plt.show()
 
-fig = plt.figure()
+#plot height where tau=1 (3D)
+fig = plt.figure(figsize = (10, 6))
 ax = fig.add_subplot(projection='3d')
 # tau1_height must be a 2D array (256, 256) with the
 # heights where tau = 1 in km
@@ -208,6 +212,35 @@ ax.plot_surface(X, Y, tau1_height, cmap='magma', rcount=100, ccount=100)
 ax.axis((6.3, -0.3, -0.3, 6.3));
 ax.set_xlabel("x (Mm)")
 ax.set_ylabel("y (Mm)")
-ax.set_zlabel("z (km)")
+ax.set_zlabel("z (km)", labelpad = 20)
+ax.set_title(r"Height at which $\tau_{500} = 1$")
+plt.tight_layout()
+plt.show()
+
+### Problem 2
+
+#compute disk centre continuous intensity from 3D at mu=1
+S = BlackBody(atm3d['temperature'], scale = i_units)(500*u.nm)
+I = trapz(S*np.exp(-tau_500_3d), tau_500_3d, axis = 0).to(i_units)
+
+#find intensity at 500 nm, mu=0.4 and 0.2
+I_02 = trapz(S*np.exp(-tau_500_3d/0.2), tau_500_3d/0.2, axis = 0).to(i_units)
+I_04 = trapz(S*np.exp(-tau_500_3d/0.4), tau_500_3d/0.4, axis = 0).to(i_units)
+
+fig, ax = plt.subplots(2, 2, figsize = (10, 5))
+im1 = ax[0, 0].imshow(I_02.value, cmap = 'inferno', aspect = 0.2)
+ax[0, 0].set_title(r"$\mu=0.2$")
+im2 = ax[1, 0].imshow(I_04.value, cmap = 'inferno', aspect = 0.4)
+ax[1, 0].set_title(r"$\mu=0.4$")
+
+gs = ax[0, 1].get_gridspec()
+for axs in ax[:, -1]:
+    axs.remove()
+axbig = fig.add_subplot(gs[:, 1])
+im3 = axbig.imshow(I.value, cmap = 'inferno', aspect = 1)
+axbig.set_title(r"$\mu = 1$")
+
+[fig.colorbar(imi, ax=axi, shrink = 0.6, label=lab) for imi, axi, lab in zip([im1, im2, im3], [ax[0, 0], ax[1, 0], axbig],
+                                                                             ['Intensity', 'Intensity', r'Intensity [kW m$^{-2}$ sr$^{-1}$ nm$^{-1}$]'])]
 plt.tight_layout()
 plt.show()
