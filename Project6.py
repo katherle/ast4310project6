@@ -105,6 +105,140 @@ DATA_FILE = "qs006024_sap_s285.fits"
 atm3d = QTable.read(DATA_FILE)
 falc = read_table_units("falc.dat")
 
+
+
+
+class Atom:
+    """
+    Reads atomic data, calculates level populations according to Boltzmann's law,
+    and ionisation fractions according to Saha's law.
+    """
+
+    def __init__(self, atomfile=None):
+        """
+        Parameters
+        ----------
+        atomfile : string, optional
+            Name of file with atomic data. If not present, atomic data needs
+            to be loaded with the .read_atom method.
+        """
+        self.loaded = False
+        if atomfile:
+            self.read_atom(atomfile)
+
+    def read_atom(self, filename):
+        """
+        Reads atom structure from text file.
+
+        Parameters
+        ----------
+        filename: string
+            Name of file with atomic data.
+        """
+        tmp = np.loadtxt(filename, unpack=True)
+        self.n_stages = int(tmp[2].max()) + 1
+
+        # Get maximum number of levels in any stage
+        self.max_levels = 0
+        for i in range(self.n_stages):
+            self.max_levels = max(self.max_levels, (tmp[2] == i).sum())
+
+        # Populate level energies and statistical weights
+        # Use a square array filled with NaNs for non-existing levels
+        chi = np.empty((self.n_stages, self.max_levels))
+        chi.fill(np.nan)
+        self.g = np.copy(chi)
+        for i in range(self.n_stages):
+            nlevels = (tmp[2] == i).sum()
+            chi[i, :nlevels] = tmp[0][tmp[2] == i]
+            self.g[i, :nlevels] = tmp[1][tmp[2] == i]
+
+        # Put units, convert from cm-1 to Joule
+        chi = (chi / u.cm).to('aJ', equivalencies=u.spectral())
+
+        # Save ionisation energies, saved as energy of first level in each stage
+        self.chi_ion = chi[:, 0].copy()
+
+        # Save level energies relative to ground level in each stage
+        self.chi = chi - self.chi_ion[:, np.newaxis]
+        self.loaded = True
+
+    def compute_partition_function(self, temperature):
+        """
+        Compute partition function using the atomic level energies and statistical  weights.
+
+        Parameters:
+        -------------
+        temperature: astropy.units.quantity (scalar or array)
+            Gas temperature in K or equivalent.
+        """
+        if not self.loaded:
+            raise ValueError("Missing atom structure. Please load atom with read_atom() function.")
+
+        temp = temperature[np.newaxis, np.newaxis]
+        pfunc = np.nansum(self.g[..., np.newaxis]
+                          *np.exp(-self.chi[..., np.newaxis]/const.k_B/temp), axis=1)
+        return pfunc
+    def compute_excitation(self, temperature):
+        """
+        Computes the level population relative to the ground state,
+        according to Boltzmann's law.
+
+        Parameters:
+        ---------------
+        temperature: astropy.units.quantity (scalar or array)
+            Gas temperature in K or equivalent.
+        """
+        pfunc = self.compute_partition_function(temperature)
+
+        #reshape arrays to allow broadcasting
+        temp = temperature[np.newaxis, np.newaxis]
+        g_ratio = self.g[..., np.newaxis]/pfunc[:, np.newaxis]
+        chi = self.chi[..., np.newaxis]
+
+        return g_ratio*np.exp(-chi/(const.k_B*temp))
+
+    def compute_ionisation(self, temperature, electron_density):
+        """
+        Computes the ionisation fraction according to the Saha law.
+
+        Parameters:
+        ---------------
+        temperature: astropy.units.quantity (scalar or array)
+            Gas temperature in K or equivalent.
+
+        electron_pressure: astropy.units.quantity (scalar)
+            Electron pressure in Pa or equivalent.
+        """
+        partition_function = self.compute_partition_function(temperature)
+
+        saha_const = ((2*np.pi*const.m_e*const.k_B*temperature)/const.h**2)**(3/2)
+        nstage = np.zeros_like(partition_function)/u.m**3
+        nstage[0] = 1./u.m**3
+
+        for r in range(self.n_stages - 1):
+            nstage[r+1] = (nstage[r]/electron_density * 2 * saha_const
+                           * partition_function[r+1]/partition_function[r]
+                           * np.exp(-self.chi_ion[r+1, np.newaxis]/(const.k_B*temperature[np.newaxis])))
+
+        return nstage/np.nansum(nstage, axis = 0)
+
+    def compute_populations(self, temperature, electron_density):
+        """
+        Computes relative level populations for all levels and all
+        ionisation stages using the Boltzmann and Saha laws.
+
+        Parameters
+        ----------
+        temperature: astropy.units.quantity (scalar or array)
+            Gas temperature in units of K or equivalent.
+        electron_pressure: astropy.units.quantity (scalar)
+            Electron pressure in units of Pa or equivalent.
+        """
+        return (self.compute_excitation(temperature)
+                * self.compute_ionisation(temperature, electron_density)[:, np.newaxis])
+
+
 #rename variables
 height = falc['height']
 tau_500 = falc['tau_500']
@@ -129,6 +263,7 @@ ax.set_title('Comparison of temp vs height for 3D and FALC')
 ax.legend()
 plt.show()
 
+
 #2D plot of temperature
 fig, ax = plt.subplots()
 im = ax.imshow(atm3d['temperature'].value[-1], cmap = 'coolwarm')
@@ -136,10 +271,12 @@ ax.set_title('Temperature at deepest point')
 fig.colorbar(im, ax=ax, shrink=0.8, label=r'Temperature (K)')
 plt.show()
 
+
 #compute tau500 from the 3D model
 alpha_H_3d = (compute_hminus_cross_section(500*u.nm, atm3d['temperature'], atm3d['electron_density'])[..., 0]*atm3d['hydrogen_density'])
 alpha_T_3d = 6.652e-29*u.m**2 * atm3d['electron_density']
 tau_500_3d = -cumtrapz(alpha_H_3d + alpha_T_3d, atm3d['height'], axis = 0, initial = 0)
+
 
 #compute tau500 from the FALC model
 n_hI = n_h - n_p
@@ -147,8 +284,10 @@ alpha_H_falc = (compute_hminus_cross_section(500*u.nm, temp, n_e)[..., 0]*n_hI)
 alpha_T_falc = 6.652e-29*u.m**2 * n_e
 tau_500_falc = -cumtrapz(alpha_H_falc + alpha_T_falc, height, initial = 0)
 
+
 #set up x and y grids, from 0 to 6 Mm (box size), 256 points
 X, Y = np.mgrid[0:6:256j, 0:6:256j]
+
 
 #3D plot of tau500 from the 3D model
 fig = plt.figure(figsize = (10, 6))
@@ -179,8 +318,8 @@ plt.grid()
 plt.legend()
 plt.show()
 
-#print(tau_500_3d.shape)
 
+"""
 #define function to find the height at which tau=1
 def tau_one(tau, height):
     nx,ny = tau_500_3d.shape[1:]
@@ -192,7 +331,6 @@ def tau_one(tau, height):
             tau1_height[i,j] = inter(1.0)
     return tau1_height
 
-#print(tau_one((tau_500_3d,0,-1), atm3d['height'])
 
 tau1_height = tau_one(np.moveaxis(tau_500_3d,0,-1), atm3d['height'])*u.m
 
@@ -243,4 +381,188 @@ axbig.set_title(r"$\mu = 1$")
 [fig.colorbar(imi, ax=axi, shrink = 0.6, label=lab) for imi, axi, lab in zip([im1, im2, im3], [ax[0, 0], ax[1, 0], axbig],
                                                                              ['Intensity', 'Intensity', r'Intensity [kW m$^{-2}$ sr$^{-1}$ nm$^{-1}$]'])]
 plt.tight_layout()
+plt.show()
+"""
+
+
+
+
+
+
+
+
+
+### Problem 3
+
+
+def damping(wave0, wave, P, T, d):
+    """
+    Finds the damping parameter for use with the Voigt function.
+
+    wave0: Line center wavelength in nm
+    wave: Array containing wavelengths in nm
+    d: Doppler broadening in nm or equivalent
+    P: Gas pressure in cgs units
+    T: Temperature in K
+    """
+    #gamma (radiation)
+    gamma_rad = (6.67e13*0.318/wave.to_value("nm")**2)/u.s
+
+    #gamma (van der waals)
+    n_u2 = const.Ryd.to('aJ', equivalencies = u.spectral()) * 1/(model_NaI.chi_ion[1] - model_NaI.chi[0, 1])
+    n_l2 = const.Ryd.to('aJ', equivalencies = u.spectral()) * 1/(model_NaI.chi_ion[1] - model_NaI.chi[0, 0])
+
+    r_u2 = n_u2/2 * (5*n_u2 + 1 - 3*2)
+    r_l2 = n_l2/2 * (5*n_l2 + 1)
+
+    log_vdw = 6.33 + 0.4*np.log10(r_u2 - r_l2) + np.log10(P.cgs.value) - 0.7*np.log10(T.si.value)
+
+    gamma_vdw = (10**log_vdw)/u.s
+
+    gamma = gamma_rad + gamma_vdw[..., nax]
+
+    #damping equation:
+    return wave**2/(4*np.pi*const.c) * gamma/d
+
+def voigt(damping, wave_sep):
+    """
+    Calculates the Voigt function H(a, u),
+    where a is the damping parameter and u is the separation from the line centre.
+    Both parameters should be dimensionless.
+    """
+    z = (wave_sep + 1j * damping)
+    return wofz(z).real
+
+def doppler_3d(wave0, T):
+    """
+    Finds the Doppler broadening.
+
+    wave0: Line center wavelength in nm
+    T: Temperature in K
+    """
+    return wave0/const.c * np.sqrt(2*const.k_B*T/(22.989769*const.u))
+
+def compute_vlos_3d(wave0, v_x, v_y, v_z, mu, azimuthal_angle = 0):
+    """
+    Computes the line of sight velocity .
+
+    Parameters
+    ----------
+    wave0: astropy.units.quantity (scalar)
+        Rest wavelength of the bound-bound transition, in units of length.
+    v_x: astropy.units.quantity (scalar or array)
+        Velocity field in x direction
+    v_y: astropy.units.quantity (scalar or array)
+        Velocity in y direction
+    v_z: astropy.units.quantity (scalar or array)
+        Velocity in z direction
+    mu:  float (scalar)
+        cos(polar angle)
+    azimuthal_angle: float (scalar)
+        Azimuthal angle
+
+    Returns
+    -------
+    line of sight shift: astropy.units.quantity (scalar or array)
+        line of sight shift in units of length. Same shape as velocities.
+    """
+    polar_angle = np.arccos(mu)
+    v_los = mu*v_z + v_y*np.sin(polar_angle)*np.sin(azimuthal_angle) + v_x*np.sin(polar_angle)*np.cos(azimuthal_angle)
+
+    return wave0.si / const.c * v_los
+
+
+
+
+# damping between 0 and 1
+# v should be a few km/s
+# Extinction around 20-30
+
+
+
+def intensity(wave0, wave, mu, T, N_E, N_HI, P, vx, vy, vz, z):
+    """
+    Calculates the line extinction.
+
+    wave0: Line center wavelength in nm
+    wave: Array containing wavelengths in nm
+    T: Temperature in K
+    N_E: Electron density in m-3
+    P: Gas pressure in cgs units
+    vx, vy, vz: Velocity in the x, y, and z directions in m s-1
+    mu: Viewing angle
+    """
+
+    I = np.zeros((200,T.shape[1]//32, T.shape[2]//32))*i_units
+    I_c = np.zeros((200,T.shape[1]//32, T.shape[2]//32))*i_units
+    #print(I.shape)
+
+    for i in range(T.shape[1]//32):
+    #for i in range(1):
+        for j in range(T.shape[2]//32):
+        #for j in range(1):
+            ANa = 1.7378e-6  #Na abundance
+            constant = (const.e.si**2/(4*const.eps0*const.m_e*const.c**2*np.sqrt(np.pi)) * N_HI[:,i,j] * ANa * 0.318)[..., nax]
+
+            #stimulated emission
+
+            stim = (1 - np.exp(-const.h*const.c/(wave*const.k_B*T[:,i,j,nax])))
+
+            #level population and line profile
+
+            doppler_width = doppler_3d(wave0, T[:,i,j])[..., nax]
+
+            level_pop = model_NaI.compute_populations(T[:,i,j], N_E[:,i,j])[0,0][..., nax]
+
+            v_los_shift = compute_vlos_3d(wave0, vx[:,i,j], vy[:,i,j], vz[:,i,j], mu)[..., nax]
+            a = damping(wave0, wave, P[:,i,j], T[:,i,j], doppler_width)
+            v = ((wave - wave0 + v_los_shift) / doppler_width).si
+
+            profile = voigt(a, v)
+
+            alpha_Hminus = compute_hminus_cross_section(wave, T[:,i,j,nax], N_E[:,i,j,nax])[..., 0]*N_HI[:,i,j,nax]
+            alpha_T = 6.652e-29*u.m**2 * N_E[:,i,j,nax]
+            alpha_li = constant * wave**2 * level_pop * profile * stim / doppler_width
+            alpha_tot =  alpha_li + alpha_Hminus + alpha_T
+            #print(alpha_tot.shape)
+
+            alpha_cont = alpha_Hminus + alpha_T
+
+            #optical depth
+            tau = cumtrapz(alpha_tot, z, axis = 0, initial = 0) #got rid of negative sign bc height is flipped
+            #source function
+            S = BlackBody(T[:,i,j,nax], scale = i_units)(wave)
+            #total intensity
+            I[:,i,j] = trapz(S*np.exp(tau/mu), tau/mu, axis = 0)
+
+            #continuum intensity (for normalization)
+            tau_c = cumtrapz(alpha_cont, z, axis = 0, initial = 0)
+            I_c[:,i,j] = trapz(S*np.exp(tau_c/mu), tau_c/mu, axis = 0)
+
+        print(i)
+
+    return I, I_c
+
+
+model_NaI = Atom("NaI_atom.txt")
+wave0 = model_NaI.chi[0, 1].to("nm", equivalencies = u.spectral())
+#lam = np.linspace(200,5000,200)*u.nm
+lam = np.linspace(589.655, 589.855, 200)*u.nm
+
+intensity = intensity(wave0, lam, 1, atm3d['temperature'], atm3d['electron_density'], atm3d['hydrogen_density'], atm3d['pressure'], atm3d['velocity_x'], atm3d['velocity_y'], atm3d['velocity_z'], atm3d['height'])
+I = intensity[0]
+I_c = intensity[1]
+
+I_mean = I.mean(axis=(1,2))
+
+#plt.plot(lam,I_mean, '--', color='red')
+
+#for i in range(len(lam)//8):
+#    plt.plot(lam,I[:,i,i])
+#print(compute_hminus_cross_section(lam, atm3d['temperature'][:,0,0,nax], atm3d['electron_density'][:,0,0,nax])*atm3d['hydrogen_density'][:,0,0,nax])
+#print(6.652e-29*u.m**2 * atm3d['electron_density'][:,0,0,nax])
+
+plt.plot(lam, I[:, 0, 0])
+#plt.plot(lam, I_c[:, 0, 0])
+#plt.xlim(0,1000)
 plt.show()
