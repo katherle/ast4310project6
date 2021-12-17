@@ -8,6 +8,7 @@ from astropy.visualization import quantity_support
 from matplotlib_inline.backend_inline import set_matplotlib_formats
 from numpy import newaxis as nax  # to simplify the many uses of this
 from mpl_toolkits.mplot3d import Axes3D # 3D plots
+from matplotlib.pyplot import cm
 
 quantity_support()
 set_matplotlib_formats('svg')
@@ -311,7 +312,7 @@ plt.legend()
 plt.show()
 
 
-"""
+
 #define function to find the height at which tau=1
 def tau_one(tau, height):
     nx,ny = tau_500_3d.shape[1:]
@@ -363,7 +364,7 @@ axbig.set_title(r"$\mu = 1$")
                                                                              ['Intensity', 'Intensity', r'Intensity [kW m$^{-2}$ sr$^{-1}$ nm$^{-1}$]'])]
 plt.tight_layout()
 plt.show()
-"""
+
 
 
 
@@ -449,17 +450,9 @@ def compute_vlos_3d(wave0, v_x, v_y, v_z, mu, azimuthal_angle):
     return wave0.si / const.c * v_los
 
 
-
-
-# damping between 0 and 1
-# v should be a few km/s
-# Extinction around 20-30
-
-
-
-def intensity_func(wave0, wave, mu, T, N_E, N_HI, P, vx, vy, vz, z, azimuth):
+def intensity_func(wave0, wave, mu, T, N_E, N_HI, P, vx, vy, vz, z, azimuth, jump):
     """
-    Calculates the line extinction.
+    Calculates the intensity profiles
     wave0: Line center wavelength in nm
     wave: Array containing wavelengths in nm
     T: Temperature in K
@@ -467,15 +460,18 @@ def intensity_func(wave0, wave, mu, T, N_E, N_HI, P, vx, vy, vz, z, azimuth):
     P: Gas pressure in cgs units
     vx, vy, vz: Velocity in the x, y, and z directions in m s-1
     mu: Viewing angle
+    z: Height in m
+    azimuth: Azimuth angle [unitless]
+    jump: How manye columns should be skipped for each calculated column. Example jump=8 gives 32 columns.
     """
 
-    I = np.zeros((len(lam),T.shape[1]//4, T.shape[2]//4))*i_units
-    I_c = np.zeros((len(lam),T.shape[1]//4, T.shape[2]//4))*i_units
+    I = np.zeros((len(lam),T.shape[1]//jump, T.shape[2]//jump))*i_units
+    I_c = np.zeros((len(lam),T.shape[1]//jump, T.shape[2]//jump))*i_units
     #print(I.shape)
 
-    for i in range(T.shape[1]//4):
+    for i in range(T.shape[1]//jump):
     #for i in range(1):
-        for j in range(T.shape[2]//4):
+        for j in range(T.shape[2]//jump):
         #for j in range(1):
             ANa = 1.7378e-6  #Na abundance
             constant = (const.e.si**2/(4*const.eps0*const.m_e*const.c) * N_HI[:,i,j] * ANa * 0.318)[..., nax]
@@ -525,10 +521,10 @@ def intensity_func(wave0, wave, mu, T, N_E, N_HI, P, vx, vy, vz, z, azimuth):
 
 model_NaI = Atom("NaI_atom.txt")
 wave0 = model_NaI.chi[0, 1].to("nm", equivalencies = u.spectral())
-lam = np.linspace(585,595,100)*u.nm
-#lam = np.linspace(200, 5000, 200)*u.nm
+lam = np.linspace(585,595,200)*u.nm
 
-#intensity = intensity_func(wave0, lam, 1., atm3d['temperature'], atm3d['electron_density'], atm3d['hydrogen_density'], atm3d['pressure'], atm3d['velocity_x'], atm3d['velocity_y'], atm3d['velocity_z'], atm3d['height'], 0)
+
+#intensity = intensity_func(wave0, lam, 1., atm3d['temperature'], atm3d['electron_density'], atm3d['hydrogen_density'], atm3d['pressure'], atm3d['velocity_x'], atm3d['velocity_y'], atm3d['velocity_z'], atm3d['height'], 0, 1)
 
 
 #I = intensity[0]
@@ -536,16 +532,19 @@ lam = np.linspace(585,595,100)*u.nm
 
 #np.save('I.npy', I.value)
 #np.save('I_c.npy', I_c.value)
-"""
+
 I = np.load('I.npy')
 I_c = np.load('I_c.npy')
 
 
 I_mean = I.mean(axis=(1,2))
 
+color = iter(cm.viridis(np.linspace(0, 1, 32)))
+
 plt.grid()
 for i in range(32):
-    plt.plot(lam,I[:,8*i,8*i])
+    c = next(color)
+    plt.plot(lam,I[:,8*i,8*i], c=c)
 plt.plot(lam,I_mean, '--', color='red', linewidth = 5.0,  label='Average')
 
 plt.xlabel(r'$\lambda$ [nm]', fontsize=14)
@@ -555,9 +554,12 @@ plt.legend(fontsize=14)
 plt.savefig('some_columns.pdf', dpi=900)
 plt.show()
 
+color = iter(cm.viridis(np.linspace(0, 1, 256)))
+
 plt.grid()
 for i in range(len(lam)):
-    plt.plot(lam,I[:,i,i])
+    c = next(color)
+    plt.plot(lam,I[:,i,i], c=c)
 plt.plot(lam,I_mean, '--', color='red', linewidth = 5.0, label='Average')
 
 plt.xlabel(r'$\lambda$ [nm]', fontsize=14)
@@ -567,15 +569,21 @@ plt.legend(fontsize=14)
 plt.savefig('all_columns.pdf', dpi=900)
 plt.show()
 
-I = np.swapaxes(I, 1,0)
-print(I.shape)
-plt.imshow(I[:,0], cmap='magma', extent=[0,6, lam[0].value, lam[-1].value])
-plt.xlabel('y [Mm]')
-plt.ylabel(r'$\lambda$ [nm]')
+
+# 3.2
+
+I_swap = np.swapaxes(I, 2,0)
+print(I_swap.shape)
+plt.imshow(I_swap[:,0], cmap='magma', extent=[lam[0].value, lam[-1].value, 0, 6])
+plt.ylabel('y [Mm]', fontsize=14)
+plt.xlabel(r'$\lambda$ [nm]', fontsize=14)
+cbar = plt.colorbar()
+cbar.set_label(r'$|I_\lambda|$ [$\mathrm{kW nm^{-1} sr^{-1} m^{-2}}$]', fontsize=14)
+plt.title('Spectrograph of a slice of 3D space')
+plt.savefig('spectrograph.pdf', dpi=900)
 plt.show()
 
 
-I = np.swapaxes(I, 1,0)
 I_stronk_arg = np.argwhere(I[0,:,:] == np.min(I[0,:,:]))
 I_weak_arg = np.argwhere(I[0,:,:] == np.max(I[0,:,:]))
 print(I_stronk_arg)
@@ -591,15 +599,14 @@ plt.savefig('weak_and_strong.pdf', dpi=900)
 plt.show()
 
 
-"""
 
 
+# 3.3
 
 
-
-def Flux_calc(wave0, wave, mu, T, N_E, N_HI, P, vx, vy, vz, z, azimuth):
+def Flux_calc(wave0, wave, mu, T, N_E, N_HI, P, vx, vy, vz, z, azimuth, jump):
     """
-    Calculates the line extinction.
+    Calculates the 3D Flux for 4 values of azimuth.
     wave0: Line center wavelength in nm
     wave: Array containing wavelengths in nm
     T: Temperature in K
@@ -607,16 +614,19 @@ def Flux_calc(wave0, wave, mu, T, N_E, N_HI, P, vx, vy, vz, z, azimuth):
     P: Gas pressure in cgs units
     vx, vy, vz: Velocity in the x, y, and z directions in m s-1
     mu: Viewing angle
+    z: Height in m
+    azimuth: Azimuth angle [unitless]
+    jump: How manye columns should be skipped for each calculated column. Example jump=8 gives 32 columns.
     """
 
-    f = np.zeros((4,3,len(lam),T.shape[1]//4, T.shape[2]//4))*i_units
+    f = np.zeros((4,3,len(lam),T.shape[1]//jump, T.shape[2]//jump))*i_units
     f_c = np.copy(f)
 
     weight_gauss = (np.array([5/9, 8/9, 5/9]) / 2)
 
     for l in range(len(azimuth)):
         for k in range(len(mu_gauss)):
-            I_all = intensity_func(wave0, lam, mu[k], atm3d['temperature'], atm3d['electron_density'], atm3d['hydrogen_density'], atm3d['pressure'], atm3d['velocity_x'], atm3d['velocity_y'], atm3d['velocity_z'], atm3d['height'], azimuth[l])
+            I_all = intensity_func(wave0, lam, mu[k], atm3d['temperature'], atm3d['electron_density'], atm3d['hydrogen_density'], atm3d['pressure'], atm3d['velocity_x'], atm3d['velocity_y'], atm3d['velocity_z'], atm3d['height'], azimuth[l], jump)
             I_flux = I_all[0]
             I_continuum = I_all[1]
             f[l,k,...] = (weight_gauss[k]*mu_gauss[k]*I_flux[nax,nax,...])
@@ -633,17 +643,32 @@ def Flux_calc(wave0, wave, mu, T, N_E, N_HI, P, vx, vy, vz, z, azimuth):
 mu_gauss = np.array([-np.sqrt(3/5), 0.0, np.sqrt(3/5)]) / 2 + 0.5
 azimuth = np.array([0,1,2,3])
 
-Fluxes = Flux_calc(wave0, lam, mu_gauss, atm3d['temperature'], atm3d['electron_density'], atm3d['hydrogen_density'], atm3d['pressure'], atm3d['velocity_x'], atm3d['velocity_y'], atm3d['velocity_z'], atm3d['height'], azimuth)
+
+"""
+#This is commented out, as it has been run before, and the calculation takes some time.
+
+Fluxes = Flux_calc(wave0, lam, mu_gauss, atm3d['temperature'], atm3d['electron_density'], atm3d['hydrogen_density'], atm3d['pressure'], atm3d['velocity_x'], atm3d['velocity_y'], atm3d['velocity_z'], atm3d['height'], azimuth, 8)
 
 Flux = Fluxes[0]
 Flux_c = Fluxes[1]
 
 np.save('Flux.npy', Flux.value)
 np.save('Flux_c.npy', Flux_c.value)
+"""
 
+# Loading the pre calculated values.
+Flux = np.load('Flux.npy')
+Flux_c = np.load('Flux_c.npy')
+
+# Averageing over all azimuth angles.
 Flux = np.mean(Flux, axis=0)
-print(Flux.shape)
+# Spatially averaging
 mean_flux = np.mean(Flux, axis=(1,2))
 
-plt.plot(lam,mean_flux)
+plt.plot(lam,abs(mean_flux))
+plt.xlabel(r'$\lambda$ [nm]')
+plt.ylabel(r'$F^+$ [$\mathrm{kW nm^{-1} sr^{-1} m^{-2}}$]')
+plt.title(r'$F^+$ as a function of $\lambda$ for all angles')
+plt.grid()
+plt.savefig('flux.pdf', dpi=900)
 plt.show()
